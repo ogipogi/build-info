@@ -30,6 +30,8 @@ import javax.annotation.Nonnull;
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
 
 /**
  * @author Ruben Perez
@@ -75,52 +77,22 @@ public class DeployTask extends DefaultTask {
         GradleArtifactoryClientConfigUpdater.setMissingBuildAttributes(
                 accRoot, getProject().getRootProject());
 
-        Set<GradleDeployDetails> allDeployDetails = Sets.newTreeSet();
+        Set<GradleDeployDetails> allDeployDetails = Collections.synchronizedSet(Sets.newTreeSet());
         List<ArtifactoryTask> orderedTasks = findArtifactoryPublishTasks(getProject().getGradle().getTaskGraph());
-        for (ArtifactoryTask artifactoryTask : orderedTasks) {
-            if (artifactoryTask.getDidWork()) {
-                ArtifactoryClientConfiguration.PublisherHandler publisher =
-                        ArtifactoryPluginUtil.getPublisherHandler(artifactoryTask.getProject());
 
-                if (publisher != null && publisher.getContextUrl() != null) {
-                    Map<String, String> moduleProps = new HashMap<String, String>(propsRoot);
-                    moduleProps.putAll(publisher.getProps());
-                    publisher.getProps().putAll(moduleProps);
-                    String contextUrl = publisher.getContextUrl();
-                    String username = publisher.getUsername();
-                    String password = publisher.getPassword();
-                    if (StringUtils.isBlank(username)) {
-                        username = "";
-                    }
-                    if (StringUtils.isBlank(password)) {
-                        password = "";
-                    }
-
-                    artifactoryTask.collectDescriptorsAndArtifactsForUpload();
-                    if (publisher.isPublishArtifacts()) {
-                        ArtifactoryBuildInfoClient client = null;
-                        try {
-                            client = new ArtifactoryBuildInfoClient(contextUrl, username, password,
-                                    new GradleClientLogger(log));
-
-                            log.debug("Uploading artifacts to Artifactory at '{}'", contextUrl);
-                            IncludeExcludePatterns patterns = new IncludeExcludePatterns(
-                                    publisher.getIncludePatterns(),
-                                    publisher.getExcludePatterns());
-                            configureProxy(accRoot, client);
-                            configConnectionTimeout(accRoot, client);
-                            configRetriesParams(accRoot, client);
-                            deployArtifacts(artifactoryTask.deployDetails, client, patterns);
-                        } finally {
-                            if (client != null) {
-                                client.close();
-                            }
-                        }
-                    }
-                    allDeployDetails.addAll(artifactoryTask.deployDetails);
-                }
-            } else {
-                log.debug("Task '{}' did no work", artifactoryTask.getPath());
+        final int parallelism = 10;
+        ForkJoinPool forkJoinPool = null;
+        try {
+            forkJoinPool = new ForkJoinPool(parallelism);
+            forkJoinPool.submit(() ->
+                    orderedTasks.parallelStream()
+                            .forEach(artifactoryTask -> deployArtifacts(accRoot, propsRoot, allDeployDetails, artifactoryTask))
+            ).get(); //this makes it an overall blocking call
+        } catch (InterruptedException | ExecutionException e) {
+            throw new RuntimeException(e);
+        } finally {
+            if (forkJoinPool != null) {
+                forkJoinPool.shutdown(); //always remember to shutdown the pool
             }
         }
 
@@ -179,6 +151,57 @@ public class DeployTask extends DefaultTask {
                     client.close();
                 }
             }
+        }
+    }
+
+    private void deployArtifacts(ArtifactoryClientConfiguration accRoot, Map<String, String> propsRoot, Set<GradleDeployDetails> allDeployDetails, ArtifactoryTask artifactoryTask) {
+        try {
+            if (artifactoryTask.getDidWork()) {
+                ArtifactoryClientConfiguration.PublisherHandler publisher =
+                        ArtifactoryPluginUtil.getPublisherHandler(artifactoryTask.getProject());
+
+                if (publisher != null && publisher.getContextUrl() != null) {
+                    Map<String, String> moduleProps = new HashMap<String, String>(propsRoot);
+                    moduleProps.putAll(publisher.getProps());
+                    publisher.getProps().putAll(moduleProps);
+                    String contextUrl = publisher.getContextUrl();
+                    String username = publisher.getUsername();
+                    String password = publisher.getPassword();
+                    if (StringUtils.isBlank(username)) {
+                        username = "";
+                    }
+                    if (StringUtils.isBlank(password)) {
+                        password = "";
+                    }
+
+                    artifactoryTask.collectDescriptorsAndArtifactsForUpload();
+                    if (publisher.isPublishArtifacts()) {
+                        ArtifactoryBuildInfoClient client = null;
+                        try {
+                            client = new ArtifactoryBuildInfoClient(contextUrl, username, password,
+                                    new GradleClientLogger(log));
+
+                            log.debug("Uploading artifacts to Artifactory at '{}'", contextUrl);
+                            IncludeExcludePatterns patterns = new IncludeExcludePatterns(
+                                    publisher.getIncludePatterns(),
+                                    publisher.getExcludePatterns());
+                            configureProxy(accRoot, client);
+                            configConnectionTimeout(accRoot, client);
+                            configRetriesParams(accRoot, client);
+                            deployArtifacts(artifactoryTask.deployDetails, client, patterns);
+                        } finally {
+                            if (client != null) {
+                                client.close();
+                            }
+                        }
+                    }
+                    allDeployDetails.addAll(artifactoryTask.deployDetails);
+                }
+            } else {
+                log.debug("Task '{}' did no work", artifactoryTask.getPath());
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 
