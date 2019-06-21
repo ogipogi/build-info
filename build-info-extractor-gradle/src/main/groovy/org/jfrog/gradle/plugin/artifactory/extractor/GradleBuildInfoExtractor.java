@@ -292,8 +292,7 @@ public class GradleBuildInfoExtractor implements BuildInfoExtractor<Project> {
                     deployExcludeDetails = new ArrayList<GradleDeployDetails>();
                 }
                 builder.artifacts(calculateArtifacts(deployIncludeDetails))
-                        .excludedArtifacts(calculateArtifacts(deployExcludeDetails))
-                        .dependencies(calculateDependencies(project));
+                        .excludedArtifacts(calculateArtifacts(deployExcludeDetails));
             } else {
                 log.warn("No publisher config found for project: " + project.getName());
             }
@@ -317,52 +316,6 @@ public class GradleBuildInfoExtractor implements BuildInfoExtractor<Project> {
             }
         }));
         return artifacts;
-    }
-
-    private List<Dependency> calculateDependencies(Project project) throws Exception {
-        Set<Configuration> configurationSet = project.getConfigurations();
-        List<Dependency> dependencies = newArrayList();
-        for (Configuration configuration : configurationSet) {
-            if (configuration.getState() != Configuration.State.RESOLVED) {
-                log.info("Artifacts for configuration '{}' were not all resolved, skipping", configuration.getName());
-                continue;
-            }
-            ResolvedConfiguration resolvedConfiguration = configuration.getResolvedConfiguration();
-            Set<ResolvedArtifact> resolvedArtifactSet = resolvedConfiguration.getResolvedArtifacts();
-            for (final ResolvedArtifact artifact : resolvedArtifactSet) {
-                File file = artifact.getFile();
-                if (file != null && file.exists()) {
-                    ModuleVersionIdentifier id = artifact.getModuleVersion().getId();
-                    final String depId = getModuleIdString(id.getGroup(),
-                            id.getName(), id.getVersion());
-                    Predicate<Dependency> idEqualsPredicate = new Predicate<Dependency>() {
-                        public boolean apply(@Nullable Dependency input) {
-                            return input.getId().equals(depId);
-                        }
-                    };
-                    // if it's already in the dependencies list just add the current scope
-                    if (any(dependencies, idEqualsPredicate)) {
-                        Dependency existingDependency = find(dependencies, idEqualsPredicate);
-                        Set<String> existingScopes = existingDependency.getScopes();
-                        existingScopes.add(configuration.getName());
-                        existingDependency.setScopes(existingScopes);
-                    } else {
-                        DependencyBuilder dependencyBuilder = new DependencyBuilder()
-                                .type(getTypeString(artifact.getType(),
-                                        artifact.getClassifier(), artifact.getExtension()))
-                                .id(depId)
-                                .scopes(Sets.newHashSet(configuration.getName()));
-                        if (file.isFile()) {
-                            // In recent gradle builds (3.4+) subproject dependencies are represented by a dir not jar.
-                            Map<String, String> checksums = FileChecksumCalculator.calculateChecksums(file, MD5, SHA1);
-                            dependencyBuilder.md5(checksums.get(MD5)).sha1(checksums.get(SHA1));
-                        }
-                        dependencies.add(dependencyBuilder.build());
-                    }
-                }
-            }
-        }
-        return dependencies;
     }
 
     private class ProjectPredicate implements Predicate<GradleDeployDetails> {
